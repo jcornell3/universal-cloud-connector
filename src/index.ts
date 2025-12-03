@@ -4,11 +4,12 @@ import EventSource from "eventsource";
 import { createReadStream, createWriteStream } from "fs";
 import { stdin, stdout, stderr } from "process";
 
-// Configuration from environment variables
-const SERVER_URL = process.env.server_url;
-const API_TOKEN = process.env.api_token;
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 1000;
+
+// Configuration will be set from initialize request
+let SERVER_URL: string | null = null;
+let API_TOKEN: string | null = null;
 
 interface JSONRPCRequest {
   jsonrpc: "2.0";
@@ -61,7 +62,7 @@ class UniversalConnector {
     return `${this.serverUrl}/messages`;
   }
 
-  private async sendRequest(payload: JSONRPCRequest): Promise<void> {
+  public async sendRequest(payload: JSONRPCRequest): Promise<void> {
     const messagesUrl = this.getMessagesUrl();
 
     try {
@@ -194,29 +195,114 @@ class UniversalConnector {
     this.logInfo(`Server URL: ${this.serverUrl}`);
     this.logInfo(`Messages URL: ${this.getMessagesUrl()}`);
 
-    this.setupStdinListener();
+    // Don't call setupStdinListener here - main() will handle stdin
     this.connectSSE();
+  }
+
+  public stop(): void {
+    this.logInfo("Universal Cloud Connector stopping");
+    this.shouldReconnect = false;
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
   }
 }
 
 async function main(): Promise<void> {
-  if (!SERVER_URL) {
-    stderr.write("ERROR: server_url environment variable is not set\n");
-    process.exit(1);
-  }
+  let buffer = "";
+  let connector: UniversalConnector | null = null;
+  let isInitialized = false;
 
-  if (!API_TOKEN) {
-    stderr.write("ERROR: api_token environment variable is not set\n");
-    process.exit(1);
-  }
+  stdin.setEncoding("utf-8");
 
-  try {
-    const connector = new UniversalConnector(SERVER_URL, API_TOKEN);
-    connector.start();
-  } catch (error) {
-    stderr.write(`FATAL ERROR: ${String(error)}\n`);
+  stdin.on("data", (chunk: string) => {
+    buffer += chunk;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const request = JSON.parse(line) as JSONRPCRequest;
+
+        // Handle initialize request to get configuration
+        if (!isInitialized && request.method === "initialize") {
+          // Extract config from initialize params
+          const params = request.params as Record<string, unknown>;
+          const config = params.initializationOptions as Record<string, unknown> || {};
+
+          SERVER_URL = (config.server_url || process.env.server_url) as string;
+          API_TOKEN = (config.api_token || process.env.api_token) as string;
+
+          if (!SERVER_URL || !API_TOKEN) {
+            stderr.write("ERROR: server_url and api_token must be provided in config or environment\n");
+            const errorResponse: JSONRPCResponse = {
+              jsonrpc: "2.0",
+              id: request.id,
+              error: {
+                code: -32002,
+                message: "Server not initialized",
+                data: "Missing server_url or api_token configuration"
+              }
+            };
+            stdout.write(JSON.stringify(errorResponse) + "\n");
+            process.exit(1);
+          }
+
+          isInitialized = true;
+          connector = new UniversalConnector(SERVER_URL, API_TOKEN);
+          connector.start();
+
+          // Send initialize response
+          const response: JSONRPCResponse = {
+            jsonrpc: "2.0",
+            id: request.id,
+            result: {
+              protocolVersion: "1.0",
+              capabilities: {},
+              serverInfo: {
+                name: "universal-cloud-connector",
+                version: "1.0.0"
+              }
+            }
+          };
+          stdout.write(JSON.stringify(response) + "\n");
+        } else if (isInitialized && connector) {
+          // After initialization, forward all requests to the connector
+          connector.sendRequest(request as JSONRPCRequest).catch((error) => {
+            stderr.write(`Error sending request: ${String(error)}\n`);
+          });
+        } else if (!isInitialized) {
+          // Not ready yet, send error
+          const errorResponse: JSONRPCResponse = {
+            jsonrpc: "2.0",
+            id: request.id,
+            error: {
+              code: -32002,
+              message: "Server not initialized"
+            }
+          };
+          stdout.write(JSON.stringify(errorResponse) + "\n");
+        }
+      } catch (error) {
+        stderr.write(`Failed to parse JSON: ${String(error)}\n`);
+      }
+    }
+  });
+
+  stdin.on("end", () => {
+    if (connector) {
+      connector.stop();
+    }
+    process.exit(0);
+  });
+
+  stdin.on("error", (error) => {
+    stderr.write(`stdin error: ${String(error)}\n`);
     process.exit(1);
-  }
+  });
 }
 
 main().catch((error) => {
