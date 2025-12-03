@@ -47,7 +47,15 @@ echo "✓ Copied manifest.json"
 cp -r "$DIST_DIR" "$TEMP_BUNDLE_DIR/"
 echo "✓ Copied compiled code (dist/)"
 
-# Copy package.json (optional but useful for version info)
+# Copy node_modules (required for runtime dependencies like eventsource)
+if [ -d "$PROJECT_DIR/node_modules" ]; then
+  cp -r "$PROJECT_DIR/node_modules" "$TEMP_BUNDLE_DIR/"
+  echo "✓ Copied node_modules"
+else
+  echo -e "${RED}WARNING: node_modules not found. Run 'npm install' first.${NC}"
+fi
+
+# Copy package.json (required for module resolution)
 cp "$PROJECT_DIR/package.json" "$TEMP_BUNDLE_DIR/"
 echo "✓ Copied package.json"
 
