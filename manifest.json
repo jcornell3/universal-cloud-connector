@@ -1,0 +1,43 @@
+{
+  "mcpVersion": "1.0",
+  "name": "universal-cloud-connector",
+  "displayName": "Universal Cloud Connector",
+  "description": "Connects Claude Desktop to any remote SSE-enabled MCP server (VPS, Cloudflare, GitHub, Docker, etc.).",
+  "version": "1.0.0",
+  "author": "MCP Community",
+  "license": "MIT",
+  "homepage": "https://github.com/anthropics/mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthropics/mcp"
+  },
+  "type": "stdio",
+  "command": "node",
+  "args": ["dist/index.js"],
+  "configurationSchema": {
+    "type": "object",
+    "title": "Universal Cloud Connector Configuration",
+    "description": "Configure connection to a remote SSE-enabled MCP server",
+    "properties": {
+      "server_url": {
+        "type": "string",
+        "title": "Server URL",
+        "description": "The full URL to the SSE endpoint (e.g., https://my-vps.com/sse or https://my-server.com/mcp/sse). If the path ends with /sse, messages will be POSTed to /messages. Otherwise, /messages will be appended.",
+        "format": "uri",
+        "examples": [
+          "https://my-vps.com/sse",
+          "https://my-server.com:3000/mcp/sse",
+          "http://localhost:3000/sse"
+        ]
+      },
+      "api_token": {
+        "type": "string",
+        "title": "API Token",
+        "description": "Bearer token for authentication with the remote server. This will be sent as: Authorization: Bearer <api_token>",
+        "format": "password"
+      }
+    },
+    "required": ["server_url", "api_token"],
+    "additionalProperties": false
+  }
+}
