@@ -368,3 +368,121 @@ docker-compose up -d --build universal-cloud-connector-test
    - Simplified to only include `test-bridge` connector
    - Removed duplicate direct entries (math-local, santa-clara-local, etc.)
    - Original config backed up to `claude_desktop_config.json.backup`
+
+---
+
+## Deployment Variant: Direct MCP Server Architecture (December 2025)
+
+### Context
+During youtube-to-mp3 MCP server debugging (December 4, 2025), a critical issue emerged: downloaded files were not syncing from Docker containers to Windows Downloads folder despite the server reporting successful downloads.
+
+### Root Cause
+A **mount point mismatch** in the backend server environment:
+- Environment variable: `DOWNLOADS_DIR=/mnt/c/Users/jcorn/Downloads` (Windows WSL path)
+- Docker volume mount destination: `/app/downloads` (container path)
+- These were **two separate mount points** - yt-dlp was writing to the WSL mount instead of the Docker mount
+
+### Decision Made
+Rather than fix the mount point translation in the bridge architecture, the team made a **pragmatic decision**: Remove the bridge layer entirely and expose backend servers directly via `docker-compose exec` from Claude Desktop.
+
+### Architecture Change
+**Original (Bridge-Based)**:
+```
+Claude → HTTP/SSE Bridge → docker-compose exec → Backend Server
+```
+
+**Current Deployment (Direct)**:
+```
+Claude → WSL bash → docker-compose exec → Backend Server
+```
+
+### Implementation
+Updated `claude_desktop_config.json` from single bridge entry to 4 direct entries:
+
+```json
+{
+  "mcpServers": {
+    "math": {
+      "command": "wsl",
+      "args": ["bash", "-c", "cd /home/jcornell/mcp-dev-environment && docker-compose exec -T math python -u /app/server.py"]
+    },
+    "santa-clara": {
+      "command": "wsl",
+      "args": ["bash", "-c", "cd /home/jcornell/mcp-dev-environment && docker-compose exec -T santa-clara python -u /app/server.py"]
+    },
+    "youtube-transcript": {
+      "command": "wsl",
+      "args": ["bash", "-c", "cd /home/jcornell/mcp-dev-environment && docker-compose exec -T youtube-transcript python -u /app/server.py"]
+    },
+    "youtube-to-mp3": {
+      "command": "wsl",
+      "args": ["bash", "-c", "cd /home/jcornell/mcp-dev-environment && docker-compose exec -T youtube-to-mp3 python -u /app/server.py"]
+    }
+  }
+}
+```
+
+### Trade-offs
+
+**Gains** ✅:
+- **Simpler Architecture**: Fewer abstraction layers (4 fewer layers in communication path)
+- **Better Debuggability**: Direct connection makes issues easier to trace
+- **Mount Point Fix**: Direct container path `DOWNLOADS_DIR=/app/downloads` eliminates translation layer
+- **Independent Failures**: Each server fails in isolation, not cascading through bridge
+- **All Servers Working**: 100% functional (math, santa-clara, youtube-transcript, youtube-to-mp3)
+
+**Losses** ❌:
+- **No Unified Entry Point**: Was 1 bridge, now 4 separate server entries
+- **Lost Dynamic Routing**: Bridge's `/route` endpoint no longer available (requires Claude Desktop restart to switch)
+- **Lost Centralized Management**: Server config scattered across docker-compose.yml and claude_desktop_config.json
+- **Reduced Extensibility**: Adding new server requires editing config file + restarting Claude Desktop
+- **Abandoned UCC Vision**: Bridge architecture was designed to be "universal" and reusable
+
+### Why This Decision?
+
+1. **Problem Urgency**: youtube-to-mp3 was completely non-functional
+2. **Root Cause Clarity**: Mount point issue would require significant bridge refactoring
+3. **Debugging Simplicity**: Fewer layers = faster diagnosis of future issues
+4. **Pragmatism**: Working direct solution faster than fixing bridge architecture
+5. **Risk Reduction**: Each server now isolated from others
+
+### Implications for Universal Cloud Connector
+
+This deployment **does not use** the Universal Cloud Connector bridge at all. Instead, it demonstrates an alternative deployment pattern where:
+
+- Backend servers are accessed directly via WSL→docker-compose exec
+- No HTTP/SSE protocol abstraction layer
+- No bridge server component
+- No dynamic routing capability
+
+The UCC bridge code still exists and remains functional for scenarios where:
+- Centralized routing is desired
+- Multiple servers need to be accessed through a single entry point
+- Dynamic server switching via `/route` endpoint is needed
+- Monitoring/management of multiple servers is required
+
+### Status
+
+- ✅ Current deployment: Direct MCP Server Architecture (December 2025)
+- ✅ All 4 backend servers fully functional
+- ✅ youtube-to-mp3 downloads correctly synced to Windows
+- ✅ Mount point issue resolved via correct container path
+- ℹ️ UCC Bridge: Still available for alternative deployments (optional)
+
+### Recommendation for Future Deployments
+
+The choice between architectures depends on needs:
+
+| Requirement | UCC Bridge | Direct (Current) |
+|-------------|-----------|------------------|
+| Single entry point | ✅ | ❌ |
+| Dynamic routing | ✅ | ❌ |
+| Simpler debugging | ❌ | ✅ |
+| Lower overhead | ❌ | ✅ |
+| Fewer config entries | ✅ | ❌ |
+| Independent servers | ❌ | ✅ |
+
+**Current choice (Direct)** optimizes for: Simplicity + Debuggability + Working file sync
+**UCC Bridge** optimizes for: Universality + Centralization + Dynamic routing
+
+Both are valid architectures for different use cases. The current deployment is documented here for transparency about the deviation from original UCC design.
