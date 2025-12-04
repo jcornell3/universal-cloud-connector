@@ -35,6 +35,7 @@ class UniversalConnector {
   private eventSource: EventSource | null = null;
   private retryCount = 0;
   private shouldReconnect = true;
+  private pendingRequests: Map<string | number, JSONRPCRequest> = new Map();
 
   constructor(serverUrl: string, apiToken: string) {
     this.serverUrl = serverUrl;
@@ -66,6 +67,11 @@ class UniversalConnector {
     const messagesUrl = this.getMessagesUrl();
 
     try {
+      // Track the request if it has an id
+      if (payload.id !== undefined) {
+        this.pendingRequests.set(payload.id, payload);
+      }
+
       const response = await fetch(messagesUrl, {
         method: "POST",
         headers: {
@@ -80,9 +86,17 @@ class UniversalConnector {
           `POST request failed with status ${response.status}`,
           await response.text()
         );
+        // Clean up pending request on error
+        if (payload.id !== undefined) {
+          this.pendingRequests.delete(payload.id);
+        }
       }
     } catch (error) {
       this.logError("Failed to send request to remote server", error);
+      // Clean up pending request on error
+      if (payload.id !== undefined) {
+        this.pendingRequests.delete(payload.id);
+      }
     }
   }
 
@@ -111,7 +125,21 @@ class UniversalConnector {
       this.eventSource.onmessage = (event: MessageEvent) => {
         try {
           const data = JSON.parse(event.data) as JSONRPCResponse;
-          stdout.write(JSON.stringify(data) + "\n");
+          // Only forward valid JSON-RPC responses (must have either result or error, and an id)
+          if ((data.result !== undefined || data.error !== undefined) && data.id !== undefined) {
+            // Check if this response matches any pending request
+            if (this.pendingRequests.has(data.id)) {
+              // This is a response to one of our pending requests - forward it
+              stdout.write(JSON.stringify(data) + "\n");
+              this.pendingRequests.delete(data.id);
+            } else {
+              // Response id doesn't match any pending request - log and skip
+              this.logInfo(`Received response for unmatched request id: ${data.id}`);
+            }
+          } else {
+            // Log non-JSON-RPC messages to stderr, don't forward to stdout
+            this.logInfo(`Received non-RPC message from SSE: ${JSON.stringify(data)}`);
+          }
         } catch (error) {
           this.logError("Failed to parse SSE message", error);
         }
@@ -232,6 +260,7 @@ async function main(): Promise<void> {
           // Extract config from initialize params
           const params = request.params as Record<string, unknown>;
           const config = params.initializationOptions as Record<string, unknown> || {};
+          const protocolVersion = params.protocolVersion as string || "2025-06-18";
 
           SERVER_URL = (config.server_url || process.env.server_url) as string;
           API_TOKEN = (config.api_token || process.env.api_token) as string;
@@ -255,12 +284,12 @@ async function main(): Promise<void> {
           connector = new UniversalConnector(SERVER_URL, API_TOKEN);
           connector.start();
 
-          // Send initialize response
+          // Send initialize response - must echo back the protocol version from the request
           const response: JSONRPCResponse = {
             jsonrpc: "2.0",
             id: request.id,
             result: {
-              protocolVersion: "1.0",
+              protocolVersion: protocolVersion,
               capabilities: {},
               serverInfo: {
                 name: "universal-cloud-connector",
