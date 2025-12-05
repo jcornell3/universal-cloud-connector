@@ -89,7 +89,7 @@ class UniversalConnector {
       messagesUrl = `${this.serverUrl}/messages`;
     }
 
-    // Add session_id as query parameter if available
+    // Add session_id as query parameter if available (snake_case to match Python MCP SDK)
     if (this.sessionId) {
       const url = new URL(messagesUrl);
       url.searchParams.set("session_id", this.sessionId);
@@ -166,8 +166,8 @@ class UniversalConnector {
       this.eventSource.addEventListener("endpoint", (event: any) => {
         const endpointData = event.data;
         this.logInfo(`[DEBUG] Received 'endpoint' event with data: ${endpointData}`);
-        // Extract session_id from: /messages?session_id=<UUID>
-        const match = endpointData.match(/session_id=([a-f0-9-]+)/);
+        // Extract session_id from: /messages?session_id=<HEX> (Python MCP SDK sends UUID.hex format - 32 hex chars)
+        const match = endpointData.match(/session_id=([a-f0-9]{32})/);
         if (match) {
           this.sessionId = match[1];
           this.logInfo(`CRITICAL: Session ID extracted from endpoint event: ${this.sessionId}`);
