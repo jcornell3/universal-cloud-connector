@@ -50,21 +50,28 @@ class UniversalConnector {
   }
 
   private async waitForSessionId(): Promise<void> {
-    // Wait until sessionId has been received
+    // Wait until sessionId has been received from the endpoint event
     // Use a simple polling approach to avoid promise reference issues
     let attempts = 0;
-    while (!this.sessionIdReceived && attempts < 100) {
+    const maxAttempts = 1000; // 10 seconds max wait (1000 × 10ms)
+
+    while (!this.sessionIdReceived && attempts < maxAttempts) {
       await new Promise(resolve => setTimeout(resolve, 10)); // Wait 10ms
       attempts++;
+
+      // Log progress every second
+      if (attempts % 100 === 0) {
+        this.logInfo(`Still waiting for endpoint event... (${attempts / 100} seconds)`);
+      }
     }
+
     if (!this.sessionIdReceived) {
-      this.logError("Timeout waiting for session_id from server");
-      // FALLBACK: If server didn't send endpoint event, generate a session_id ourselves
-      // This handles servers that don't properly implement SSE endpoint event
-      this.sessionId = randomUUID();
-      this.logInfo(`FALLBACK: Generated session_id for server that didn't send endpoint event: ${this.sessionId}`);
-      this.sessionIdReceived = true;
+      this.logError(`Timeout after ${maxAttempts * 10}ms waiting for session_id from server`);
+      this.logError("The SSE endpoint event was never received. This indicates a problem with the EventSource connection.");
+      throw new Error("Failed to receive endpoint event with session_id");
     }
+
+    this.logInfo(`Session ID ready after ${attempts * 10}ms`);
   }
 
   private logError(message: string, error?: unknown): void {
@@ -166,6 +173,7 @@ class UniversalConnector {
 
       this.eventSource.onopen = () => {
         this.logInfo("SSE connection established");
+        this.logInfo(`EventSource readyState: ${this.eventSource?.readyState}`);
         this.retryCount = 0;
         // Clear processed message cache on new connection
         this.processedMessageIds.clear();
