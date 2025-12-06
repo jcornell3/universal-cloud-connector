@@ -125,15 +125,29 @@ class UniversalConnector {
           `POST request failed with status ${response.status}`,
           await response.text()
         );
-        // Note: Don't delete from pendingRequests here - let the caller handle cleanup on error
+        // Clean up the pending request on error
+        if (payload.id !== undefined && this.pendingRequests.has(payload.id)) {
+          this.pendingRequests.delete(payload.id);
+        }
       }
+      // Note: If response is ok (202 Accepted), the response will come back via SSE stream
+      // Don't delete from pendingRequests here - wait for the SSE response
     } catch (error) {
       this.logError("Failed to send request to remote server", error);
-      // Note: Don't delete from pendingRequests here - let the caller handle cleanup on error
+      // Clean up the pending request on error
+      if (payload.id !== undefined && this.pendingRequests.has(payload.id)) {
+        this.pendingRequests.delete(payload.id);
+      }
     }
   }
 
   private connectSSE(): void {
+    // CRITICAL: This method connects to /sse and KEEPS THE CONNECTION OPEN
+    // The MCP SDK sends:
+    // 1. The 'endpoint' event with session_id (on initial connection)
+    // 2. Message events with JSON-RPC responses (as requests are processed)
+    // Both come through the same SSE stream
+
     if (this.eventSource) {
       this.eventSource.close();
     }
@@ -153,24 +167,23 @@ class UniversalConnector {
       this.eventSource.onopen = () => {
         this.logInfo("SSE connection established");
         this.retryCount = 0;
-        // Clear processed message cache on new connection to avoid blocking valid retries
+        // Clear processed message cache on new connection
         this.processedMessageIds.clear();
         // Reset session ID on new connection (will be sent by server in endpoint event)
         this.sessionId = null;
-        // Reset the sessionIdReceived flag on new connection
         this.sessionIdReceived = false;
       };
 
       // CRITICAL: Handle the 'endpoint' event which contains the session_id
-      // EventSource uses addEventListener for named events like 'endpoint'
+      // This event signals that the session is ready for message handling
       this.eventSource.addEventListener("endpoint", (event: any) => {
         const endpointData = event.data;
-        this.logInfo(`[DEBUG] Received 'endpoint' event with data: ${endpointData}`);
+        this.logInfo(`[ENDPOINT-EVENT] Received: ${endpointData}`);
         // Extract session_id from: /messages?session_id=<HEX> (Python MCP SDK sends UUID.hex format - 32 hex chars)
         const match = endpointData.match(/session_id=([a-f0-9]{32})/);
         if (match) {
           this.sessionId = match[1];
-          this.logInfo(`CRITICAL: Session ID extracted from endpoint event: ${this.sessionId}`);
+          this.logInfo(`[CRITICAL] Session ID extracted from endpoint: ${this.sessionId}`);
           // Signal that session_id is ready for use
           this.sessionIdReceived = true;
         } else {
@@ -178,41 +191,27 @@ class UniversalConnector {
         }
       });
 
-      // Debug all SSE events
-      this.eventSource.addEventListener("error", (event: any) => {
-        this.logInfo(`[DEBUG] Received 'error' event: ${JSON.stringify(event)}`);
-      });
-
-      // Catch all events with custom event listener
-      const originalAddEventListener = this.eventSource.addEventListener;
-      this.eventSource.addEventListener = function(eventName: string, listener: any) {
-        if (eventName !== "message" && eventName !== "error" && eventName !== "open" && eventName !== "close") {
-          console.error(`[DEBUG] EventSource received named event: ${eventName}`);
-        }
-        originalAddEventListener.call(this, eventName, listener);
-      };
-
+      // Handle message events - these are the JSON-RPC responses
+      // The MCP SDK sends responses as SSE message events (event: message)
       this.eventSource.onmessage = (event: MessageEvent) => {
         this.lastMessageTime = Date.now();
 
         try {
           const data = JSON.parse(event.data) as JSONRPCResponse;
-          this.logInfo(`[DEBUG-ONMESSAGE] Raw event data: ${event.data.substring(0, 100)}`);
+          this.logInfo(`[SSE-MESSAGE] Received response for id ${data.id}`);
 
           // Only forward valid JSON-RPC responses (must have either result or error, and an id)
           if ((data.result !== undefined || data.error !== undefined) && data.id !== undefined) {
             // Create a unique key for this message to detect duplicates
             const messageKey = `${data.id}:${JSON.stringify(data)}`;
-            this.logInfo(`[DEBUG-DEDUP] Created messageKey for id ${data.id}. Cache size: ${this.processedMessageIds.size}`);
 
             // Check if we've already processed this exact message
             if (this.processedMessageIds.has(messageKey)) {
-              this.logInfo(`[DEBUG-SSE] Duplicate message received for id ${data.id}, skipping`);
+              this.logInfo(`[DEDUP] Duplicate message for id ${data.id}, skipping`);
               return;
             }
 
             // Mark this message as processed
-            this.logInfo(`[DEBUG-DEDUP] Adding messageKey for id ${data.id} to cache`);
             this.processedMessageIds.add(messageKey);
             // Clear old entries to prevent memory leak (keep only recent 1000)
             if (this.processedMessageIds.size > 1000) {
@@ -226,7 +225,6 @@ class UniversalConnector {
             }
 
             // Check if this response matches any pending request
-            this.logInfo(`[DEBUG-SSE] Received response for id ${data.id}. pendingRequests has ${this.pendingRequests.size} entries. Keys: ${Array.from(this.pendingRequests.keys()).join(", ")}`);
             if (this.pendingRequests.has(data.id)) {
               // This is a response to one of our pending requests - forward it
               stdout.write(JSON.stringify(data) + "\n");
@@ -236,7 +234,7 @@ class UniversalConnector {
               this.logInfo(`Received response for unmatched request id: ${data.id}`);
             }
           } else {
-            // Log non-JSON-RPC messages to stderr, don't forward to stdout
+            // Log non-JSON-RPC messages
             this.logInfo(`Received non-RPC message from SSE: ${JSON.stringify(data)}`);
           }
         } catch (error) {
@@ -266,8 +264,6 @@ class UniversalConnector {
             `Failed to connect after ${MAX_RETRIES} attempts. Giving up.`
           );
           this.shouldReconnect = false;
-          // Don't exit immediately - let the MCP protocol handle disconnection
-          // process.exit(1);
         }
       };
     } catch (error) {

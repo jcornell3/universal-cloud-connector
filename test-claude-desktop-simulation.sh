@@ -35,11 +35,13 @@ run_test() {
 
     # Tools list request
     echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-    sleep 1
+    sleep 2
+
+    # Close stdin to signal end of input
   } | (
     export server_url="$server_url"
     export api_token="default-api-key"
-    timeout 5 /home/jcornell/.nvm/versions/node/v24.11.1/bin/node dist/index.js 2>&1
+    timeout 10 /home/jcornell/.nvm/versions/node/v24.11.1/bin/node dist/index.js 2>&1
   ) > "$temp_output" 2>&1
 
   # Check for initialize response
